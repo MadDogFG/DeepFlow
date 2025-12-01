@@ -7,7 +7,26 @@
 import { GoogleGenAI } from "@google/genai";
 import { PromptIdea, StructureSuggestion, CompletionOption, AISettings } from "../types";
 import { getAISettings } from "./storage";
-import { PROMPTS, DEFAULT_AI_SETTINGS } from "../config/appConfig";
+import { DEFAULT_AI_SETTINGS } from "../config/appConfig";
+
+let promptsConfig: any = null;
+
+async function getPrompts() {
+  if (!promptsConfig) {
+    try {
+      const response = await fetch('/config/prompts.json');
+      promptsConfig = await response.json();
+    } catch (error) {
+      console.error("Failed to load prompts config:", error);
+      throw new Error("Failed to load prompts configuration");
+    }
+  }
+  return promptsConfig;
+}
+
+function formatTemplate(template: string, variables: Record<string, string>): string {
+  return template.replace(/\{\{(\w+)\}\}/g, (_, key) => variables[key] || '');
+}
 
 /**
  * 获取有效的 API 配置。
@@ -104,12 +123,15 @@ async function callGemini(
   // 严格遵循 SDK 规范：使用命名参数初始化
   const ai = new GoogleGenAI({ apiKey: config.apiKey });
   
-  // 如果未指定模型，默认使用 gemini-2.5-flash
-  const modelId = config.modelName || DEFAULT_AI_SETTINGS.modelName;
+  const prompts = await getPrompts();
+  const defaultSettings = prompts.SETTINGS || DEFAULT_AI_SETTINGS;
+
+  // 如果未指定模型，默认使用配置中的模型
+  const modelId = config.modelName || defaultSettings.modelName;
   
   const generateConfig: any = {
     systemInstruction: systemPrompt,
-    temperature: 0.7,
+    temperature: defaultSettings.temperature || 0.7,
   };
 
   if (jsonMode) {
@@ -142,9 +164,12 @@ async function callOpenAI(
   userPrompt: string, 
   jsonMode: boolean
 ): Promise<string> {
+  const prompts = await getPrompts();
+  const defaultSettings = prompts.SETTINGS || DEFAULT_AI_SETTINGS;
+
   const baseUrl = config.baseUrl?.replace(/\/+$/, '') || 'https://api.openai.com/v1';
   const url = `${baseUrl}/chat/completions`;
-  const model = config.modelName || 'gpt-4o-mini';
+  const model = config.modelName || defaultSettings.modelName || 'gpt-4o-mini';
 
   const body: any = {
     model: model,
@@ -190,8 +215,15 @@ async function callOpenAI(
  */
 export const generateInspiration = async (hint?: string): Promise<PromptIdea> => {
   try {
-    const prompt = PROMPTS.INSPIRATION.userTemplate(hint);
-    const text = await generateText(PROMPTS.INSPIRATION.system, prompt, true);
+    const prompts = await getPrompts();
+    const config = prompts.INSPIRATION;
+    
+    const hintText = hint 
+      ? formatTemplate(config.hintText.present, { hint })
+      : config.hintText.missing;
+      
+    const prompt = formatTemplate(config.userTemplate, { hint_text: hintText });
+    const text = await generateText(config.system, prompt, true);
     
     // 手动清理，因为这里返回的是单个对象而非数组
     const cleanText = text.replace(/```json/g, '').replace(/```/g, '').trim();
@@ -215,8 +247,11 @@ export const generateGhostCompletion = async (currentText: string): Promise<stri
         // 截取最近的 1000 个字符作为上下文，既节省 Token 又能保证连贯性
         const context = currentText.slice(-1000); 
         
-        const systemPrompt = PROMPTS.GHOST_TEXT.system;
-        const prompt = PROMPTS.GHOST_TEXT.userTemplate(context);
+        const prompts = await getPrompts();
+        const config = prompts.GHOST_TEXT;
+        
+        const systemPrompt = config.system;
+        const prompt = formatTemplate(config.userTemplate, { context: context.slice(-200) });
 
         const text = await generateText(systemPrompt, prompt, true);
         
@@ -248,9 +283,15 @@ export const generateGhostCompletion = async (currentText: string): Promise<stri
  */
 export const generatePolishingOptions = async (selectedText: string, context: string): Promise<CompletionOption[]> => {
     try {
+        const prompts = await getPrompts();
+        const config = prompts.POLISHING;
+
         // 上下文取选中内容之前的 300 个字符，帮助 AI 理解语境
-        const prompt = PROMPTS.POLISHING.userTemplate(selectedText, context.slice(-300));
-        const systemPrompt = PROMPTS.POLISHING.system;
+        const prompt = formatTemplate(config.userTemplate, { 
+            selectedText, 
+            context: context.slice(-300) 
+        });
+        const systemPrompt = config.system;
         
         const result = await generateText(systemPrompt, prompt, true);
         return parseAsArray<CompletionOption>(result);
@@ -268,8 +309,11 @@ export const analyzeStructure = async (text: string, topic?: string): Promise<St
   try {
     if (text.length < 10) return []; // 文本太短不进行分析
     
-    const prompt = PROMPTS.STRUCTURE_ANALYSIS.userTemplate(text);
-    const system = PROMPTS.STRUCTURE_ANALYSIS.system;
+    const prompts = await getPrompts();
+    const config = prompts.STRUCTURE_ANALYSIS;
+
+    const prompt = formatTemplate(config.userTemplate, { text });
+    const system = config.system;
 
     const result = await generateText(system, prompt, true);
     return parseAsArray<StructureSuggestion>(result);
